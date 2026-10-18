@@ -1,0 +1,62 @@
+{
+  "schema": {
+    "orders":          ["id", "customer_id", "amount", "status", "created_at"],
+    "customers":       ["id", "name", "region", "signup_date"],
+    "payments":        ["id", "order_id", "method", "paid_at"],
+    "refunds":         ["id", "order_id", "amount", "created_at"],
+    "daily_revenue":   ["day", "revenue", "orders_count"],
+    "customer_ltv":    ["customer_id", "ltv"],
+    "revenue_by_region": ["region", "day", "revenue"],
+    "exec_kpis":       ["day", "revenue", "refunds", "net_revenue"]
+  },
+  "queries": [
+    {
+      "id": "q_daily_revenue",
+      "title": "Build daily revenue",
+      "owner": "Aarav",
+      "sql": "INSERT INTO daily_revenue (day, revenue, orders_count) SELECT DATE(o.created_at) AS day, SUM(o.amount) AS revenue, COUNT(*) AS orders_count FROM orders o WHERE o.status = 'paid' GROUP BY DATE(o.created_at)"
+    },
+    {
+      "id": "q_customer_ltv",
+      "title": "Customer lifetime value",
+      "owner": "Meera",
+      "sql": "CREATE TABLE customer_ltv AS SELECT o.customer_id, SUM(o.amount) AS ltv FROM orders o JOIN customers c ON c.id = o.customer_id WHERE o.status = 'paid' GROUP BY o.customer_id"
+    },
+    {
+      "id": "q_rev_by_region",
+      "title": "Revenue by region",
+      "owner": "Aarav",
+      "sql": "INSERT INTO revenue_by_region (region, day, revenue) SELECT c.region, DATE(o.created_at), SUM(o.amount) FROM orders o JOIN customers c ON c.id = o.customer_id WHERE o.status = 'paid' GROUP BY c.region, DATE(o.created_at)"
+    },
+    {
+      "id": "q_exec_kpis",
+      "title": "Executive net revenue KPIs",
+      "owner": "Kabir",
+      "sql": "INSERT INTO exec_kpis (day, revenue, refunds, net_revenue) SELECT d.day, d.revenue, COALESCE(SUM(r.amount), 0), d.revenue - COALESCE(SUM(r.amount), 0) FROM daily_revenue d LEFT JOIN refunds r ON DATE(r.created_at) = d.day GROUP BY d.day, d.revenue"
+    },
+    {
+      "id": "q_payment_mix",
+      "title": "Payment method mix",
+      "owner": "Meera",
+      "sql": "SELECT p.method, COUNT(*) AS n FROM payments p JOIN orders o ON o.id = p.order_id WHERE o.status = 'paid' GROUP BY p.method"
+    },
+    {
+      "id": "q_churn_risk",
+      "title": "Churn risk customers",
+      "owner": "Dev",
+      "sql": "SELECT c.id, c.name, MAX(o.created_at) AS last_order FROM customers c LEFT JOIN orders o ON o.customer_id = c.id GROUP BY c.id, c.name HAVING MAX(o.created_at) < NOW() - INTERVAL '90 days'"
+    },
+    {
+      "id": "q_ltv_segments",
+      "title": "LTV segments",
+      "owner": "Dev",
+      "sql": "SELECT customer_id, ltv, CASE WHEN ltv > 1000 THEN 'gold' ELSE 'standard' END AS segment FROM customer_ltv"
+    }
+  ],
+  "dashboards": [
+    {"name": "Exec KPI Board",  "owner": "Priya", "queries": ["q_exec_kpis"]},
+    {"name": "Sales Overview",  "owner": "Aarav", "queries": ["q_daily_revenue", "q_rev_by_region"]},
+    {"name": "Customer Health", "owner": "Dev",   "queries": ["q_churn_risk", "q_ltv_segments"]},
+    {"name": "Finance Weekly",  "owner": "Kabir", "queries": ["q_exec_kpis", "q_payment_mix"]}
+  ]
+}

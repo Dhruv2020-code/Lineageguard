@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>LineageGuard — graph-powered data change impact agent</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="https://unpkg.com/vis-network@9.1.9/standalone/umd/vis-network.min.js"></script>
+<style>
+  :root { --bg:#0b0d12; --panel:#12151c; --line:#232838; --text:#e6e8ee; --mute:#8b93a7; --acc:#7c6cff; }
+  * { box-sizing:border-box; }
+  html, body { height:100%; overflow:hidden; }
+  body { margin:0; height:100vh; overflow:hidden; background:var(--bg); color:var(--text); font:14px/1.5 Inter,system-ui,sans-serif; }
+  header { display:flex; align-items:center; gap:12px; padding:0 20px; height:54px; box-sizing:border-box; border-bottom:1px solid var(--line); }
+  header h1 { font-size:16px; margin:0; }
+  header span { color:var(--mute); }
+  button { background:var(--acc); color:#fff; border:0; border-radius:6px; padding:8px 14px; cursor:pointer; font-weight:600; }
+  button.ghost { background:transparent; border:1px solid var(--line); color:var(--text); font-weight:400; }
+  button:disabled { opacity:.5; cursor:wait; }
+  main { display:grid; grid-template-columns:1.2fr 1fr; height:calc(100vh - 54px); overflow:hidden; }
+  #net { position:absolute; top:0; left:0; right:0; bottom:0; }
+  aside { display:flex; flex-direction:column; min-height:0; height:100%; overflow:hidden; border-left:1px solid var(--line); }
+  #chat { flex:1; overflow:auto; padding:16px; }
+  .msg { margin-bottom:14px; padding:10px 12px; border-radius:8px; background:var(--panel); border:1px solid var(--line); white-space:pre-wrap; }
+  .msg.user { border-color:var(--acc); }
+  details { margin-top:8px; color:var(--mute); }
+  details pre { background:#0b0d12; padding:8px; border-radius:6px; overflow:auto; max-height:180px; color:#b7c0d8; }
+  .chips { display:flex; flex-wrap:wrap; gap:6px; padding:0 16px 8px; }
+  .chips button { font-size:12px; padding:5px 9px; }
+  form { display:flex; gap:8px; padding:12px 16px; border-top:1px solid var(--line); }
+  input { flex:1; background:var(--panel); border:1px solid var(--line); color:var(--text); border-radius:6px; padding:9px 11px; }
+  .legend { z-index:5; position:absolute; left:14px; bottom:12px; font-size:12px; color:var(--mute); display:flex; gap:10px; flex-wrap:wrap; }
+  .dot { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:4px; }
+  #netwrap { position:relative; min-height:0; height:100%; overflow:hidden; }
+</style>
+</head>
+<body>
+<header>
+  <h1>LineageGuard <small style="color:#7c6cff;font-size:11px">v3</small></h1><span>Ask what breaks before you change your data. Powered by FalkorDB.</span>
+  <span style="flex:1"></span>
+  <button class="ghost" id="reload">Load sample workspace</button>
+</header>
+<main>
+  <div id="netwrap">
+    <div id="net"></div>
+    <div class="legend">
+      <span><i class="dot" style="background:#4dabf7"></i>Table</span>
+      <span><i class="dot" style="background:#9775fa"></i>Query</span>
+      <span><i class="dot" style="background:#ff922b"></i>Dashboard</span>
+      <span><i class="dot" style="background:#51cf66"></i>Person</span>
+      <span><i class="dot" style="background:#ff6b6b"></i>Used by agent</span>
+    </div>
+  </div>
+  <aside>
+    <div id="chat"></div>
+    <div class="chips" id="chips"></div>
+    <form id="form"><input id="q" placeholder="e.g. What breaks if I rename orders.amount?" autocomplete="off"><button id="send">Ask</button></form>
+  </aside>
+</main>
+<script>
+const COLORS = { Table:"#4dabf7", Query:"#9775fa", Dashboard:"#ff922b", Person:"#51cf66" };
+const SAMPLES = [
+  "What breaks if I rename orders.amount?",
+  "If I drop the refunds table, which dashboards and owners are affected?",
+  "Who should I notify before changing customers.region?",
+  "Which tables are upstream of exec_kpis?",
+  "What did we learn about orders earlier?"
+];
+let network, nodesDS, edgesDS;
+function fitLayout(){
+  const h = window.innerHeight - 54;
+  document.querySelector("main").style.height = h + "px";
+  document.getElementById("netwrap").style.height = h + "px";
+  document.querySelector("aside").style.height = h + "px";
+  document.getElementById("net").style.height = h + "px";
+  window.scrollTo(0, 0);
+}
+window.addEventListener("resize", () => { fitLayout(); if (network) network.fit({ animation:false }); });
+fitLayout();
+
+function esc(s){ return String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+
+// tiny markdown renderer for the agent's answers (headings, bold, italic, code, bullets)
+function md(s){
+  s = esc(s);
+  s = s.replace(/^\s*[*-]\s+/gm, '\u2022 ');
+  s = s.replace(/^#{1,6}\s+(.*)$/gm, '<h4 style="margin:12px 0 4px;color:#c9cfe4">$1</h4>');
+  s = s.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
+  s = s.replace(/\*(?!\s)(.+?)(?<!\s)\*/g, '<i>$1</i>');
+  s = s.replace(/`([^`]+)`/g, '<code style="background:#0b0d12;padding:1px 5px;border-radius:4px">$1</code>');
+  return s;
+}
+
+async function loadGraph(){
+  const r = await fetch("/api/graph");
+  if(!r.ok){ return; }
+  const g = await r.json();
+  if(typeof vis === "undefined"){ addMsg("Graph library failed to load (check internet / ad-blocker). Chat still works.", "bot"); return; }
+  if(!g.nodes.length){ addMsg("Graph is empty. Click 'Load sample workspace' (top right).", "bot"); return; }
+  nodesDS = new vis.DataSet(g.nodes.map(n => ({ id:n.id, label:n.label, color:COLORS[n.group], font:{color:"#fff", size:12},
+      shape: n.group==="Table" ? "box" : n.group==="Person" ? "ellipse" : n.group==="Dashboard" ? "diamond" : "dot", group:n.group })));
+  edgesDS = new vis.DataSet(g.edges.map(e => ({ from:e.from, to:e.to, label:e.label, arrows:"to", font:{size:9, color:"#8b93a7", strokeWidth:0},
+      color:{color:"#3a4160"}, dashes: e.label==="FEEDS" })));
+  network = new vis.Network(document.getElementById("net"), { nodes:nodesDS, edges:edgesDS },
+    { layout:{ hierarchical:{ direction:'LR', sortMethod:'directed', levelSeparation:190, nodeSpacing:80 } }, physics:false, interaction:{ hover:true, navigationButtons:false } });
+  network.once('afterDrawing', () => network.fit({ animation:false }));
+  setTimeout(() => network && network.fit({ animation:false }), 400);
+}
+
+function addMsg(text, cls, trace){
+  const d = document.createElement("div"); d.className = "msg " + cls;
+  d.innerHTML = cls === "bot" ? md(text) : esc(text);
+  if(trace && trace.length){
+    const det = document.createElement("details");
+    det.innerHTML = `<summary>How the agent got here (${trace.length} graph tool calls)</summary>` +
+      trace.map((t,i)=>`<pre>#${i+1} ${esc(t.tool)}(${esc(JSON.stringify(t.args))})\n→ ${esc(JSON.stringify(t.result, null, 1))}</pre>`).join("");
+    d.appendChild(det);
+  }
+  const chat = document.getElementById("chat"); chat.appendChild(d); chat.scrollTop = chat.scrollHeight;
+}
+
+function highlight(trace){
+  if(!nodesDS) return;
+  const strings = new Set();
+  (function walk(v){ if(typeof v==="string") strings.add(v); else if(Array.isArray(v)) v.forEach(walk); else if(v&&typeof v==="object") Object.values(v).forEach(walk); })(trace);
+  nodesDS.get().forEach(n => {
+    const hit = strings.has(n.label);
+    nodesDS.update({ id:n.id, color: hit ? "#ff6b6b" : COLORS[n.group], borderWidth: hit ? 3 : 1 });
+  });
+}
+
+async function ask(q){
+  if(!q) return;
+  addMsg(q, "user");
+  const btn = document.getElementById("send"); btn.disabled = true;
+  try {
+    const r = await fetch("/api/ask", { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify({ question:q }) });
+    const data = await r.json();
+    if(!r.ok) throw new Error(data.detail || "Request failed");
+    addMsg(data.answer, "bot", data.trace);
+    highlight(data.trace);
+  } catch(e){ addMsg("Error: " + e.message, "bot"); }
+  btn.disabled = false;
+}
+
+document.getElementById("form").addEventListener("submit", e => {
+  e.preventDefault(); const i = document.getElementById("q"); const q = i.value.trim(); i.value = ""; ask(q);
+});
+document.getElementById("reload").addEventListener("click", async () => {
+  const b = document.getElementById("reload"); b.disabled = true;
+  const r = await fetch("/api/ingest", { method:"POST" });
+  const d = await r.json();
+  addMsg(r.ok ? `Graph loaded: ${d.tables} tables, ${d.queries} queries, ${d.edges} lineage edges.` : "Ingest error: " + (d.detail||""), "bot");
+  await loadGraph(); b.disabled = false;
+});
+SAMPLES.forEach(s => { const b = document.createElement("button"); b.className="ghost"; b.textContent=s; b.onclick=()=>ask(s); document.getElementById("chips").appendChild(b); });
+loadGraph();
+</script>
+</body>
+</html>
