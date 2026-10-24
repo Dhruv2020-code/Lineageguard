@@ -1,6 +1,6 @@
 # LineageGuard: "What breaks if I change this?" agent
 
-**Graph Hacks 2026 | Track 1: Agents That Act on Connected Data** | Powered by FalkorDB
+**Conference Hackathon 2026 | Track 1: Agents That Act on Connected Data** | Powered by FalkorDB
 
 Repo: https://github.com/Dhruv2020-code/lineageguard
 
